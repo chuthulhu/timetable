@@ -2,9 +2,10 @@ from PyQt5 import QtWidgets, QtCore
 from typing import Dict, Tuple
 
 from infra.settings import load_config, save_config
-from core.schedule import get_current_period
+from core.schedule import get_current_period, get_current_break_next_period
 from app.dialogs.edit_config_dialog import EditConfigDialog
 from infra.theme import get_stylesheet
+from app.dialogs.theme_settings_dialog import ThemeSettingsDialog
 
 
 class TimetableWidget(QtWidgets.QWidget):
@@ -49,8 +50,11 @@ class TimetableWidget(QtWidgets.QWidget):
         self.period_headers: Dict[int, QtWidgets.QLabel] = {}
         self.cells: Dict[Tuple[int, int], QtWidgets.QLabel] = {}
 
-        # Top-left empty cell
-        self.grid.addWidget(QtWidgets.QLabel(""), 0, 0)
+        # Top-left handle cell for moving window
+        self.handle = QtWidgets.QLabel("≡")
+        self.handle.setAlignment(QtCore.Qt.AlignCenter)
+        self.handle.setProperty("role", "handle")
+        self.grid.addWidget(self.handle, 0, 0)
 
         # Day headers (columns)
         for c, day in enumerate(self.config.days, start=1):
@@ -88,10 +92,14 @@ class TimetableWidget(QtWidgets.QWidget):
         menu = QtWidgets.QMenu(self)
         edit_cfg = menu.addAction("요일/교시/시간 편집")
         edit_cfg.triggered.connect(self.open_edit_config)
+        theme_cfg = menu.addAction("디자인 설정")
+        theme_cfg.triggered.connect(self.open_theme_settings)
         menu.addSeparator()
         exit_act = menu.addAction("종료")
         exit_act.triggered.connect(QtWidgets.QApplication.instance().quit)
         menu.exec_(self.mapToGlobal(pos))
+        # 메뉴 종료 후 하이라이트 재적용(일부 환경에서 스타일 초기화 보정)
+        self._update_current_period()
 
     def open_edit_config(self):
         dlg = EditConfigDialog(self, config=self.config)
@@ -100,6 +108,47 @@ class TimetableWidget(QtWidgets.QWidget):
             save_config(self.config)
             self._rebuild_grid()
             self._update_current_period()
+
+    def open_theme_settings(self):
+        def preview(tokens: Dict[str, str]):
+            # 임시로 현재 config에 미리보기 토큰만 반영해 스타일 재적용
+            prev_tokens = dict(self.config.theme.tokens or {})
+            self.config.theme.tokens = tokens
+            self.setStyleSheet(get_stylesheet(self.config))
+            # 하이라이트 갱신
+            self._update_current_period()
+            # 미리보기 후 원복 (실제 적용은 OK에서 처리)
+            self.config.theme.tokens = prev_tokens
+
+        dlg = ThemeSettingsDialog(self, config=self.config, on_preview=preview)
+        if dlg.exec_() == QtWidgets.QDialog.Accepted:
+            self.config = dlg.apply_to_config()
+            save_config(self.config)
+            # Reapply stylesheet
+            self.setStyleSheet(get_stylesheet(self.config))
+            # Reapply highlight after stylesheet change
+            self._update_current_period()
+
+    def toggle_position_lock_from_tray(self, checked: bool):
+        try:
+            self.config.ui.position.lock = bool(checked)
+            save_config(self.config)
+        finally:
+            pass
+
+    def reset_settings_from_tray(self):
+        try:
+            from infra.paths import get_config_file_path
+            import os
+            cfg_path = get_config_file_path()
+            if os.path.exists(cfg_path):
+                os.remove(cfg_path)
+        except Exception:
+            pass
+        self.config, _ = load_config()
+        self._rebuild_grid()
+        self.setStyleSheet(get_stylesheet(self.config))
+        self._update_current_period()
 
     def _rebuild_grid(self):
         # Clear existing grid widgets
@@ -180,6 +229,7 @@ class TimetableWidget(QtWidgets.QWidget):
 
         for (r, c), w in self.cells.items():
             w.setProperty("current", False)
+            w.setProperty("breaknext", False)
             w.style().unpolish(w)
             w.style().polish(w)
 
@@ -192,16 +242,31 @@ class TimetableWidget(QtWidgets.QWidget):
                 w.style().unpolish(w)
                 w.style().polish(w)
 
+        # Break highlight: if in break after period N, highlight next period's border
+        break_next = None
+        if today_id in day_index:
+            break_next = get_current_break_next_period(self.config, today_id, now)
+        if break_next is not None:
+            nr = period_index.get(break_next)
+            nc = day_index.get(today_id)
+            if nr and nc and (nr, nc) in self.cells:
+                w = self.cells[(nr, nc)]
+                w.setProperty("breaknext", True)
+                w.style().unpolish(w)
+                w.style().polish(w)
+
     # Basic drag/resize
     def mousePressEvent(self, event):
         if event.button() == QtCore.Qt.LeftButton:
             pos = event.pos()
+            # Resize zone
             if pos.x() >= self.rect().width() - 20 and pos.y() >= self.rect().height() - 20:
                 self.resizing = True
                 self.resize_start = event.globalPos()
                 self.initial_size = self.size()
                 self.setCursor(QtCore.Qt.SizeFDiagCursor)
-            else:
+            # Drag by handle area (top-left cell) or anywhere when not locked
+            elif self.handle.geometry().contains(pos) or not self.config.ui.position.lock:
                 self.dragging = True
                 self.drag_start = event.globalPos() - self.frameGeometry().topLeft()
                 self.setCursor(QtCore.Qt.ClosedHandCursor)

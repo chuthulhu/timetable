@@ -38,3 +38,20 @@ def get_next_period(config: AppConfig, day_id: str, now: QTime) -> Optional[str]
     return None
 
 
+def get_current_break_next_period(
+    config: AppConfig, day_id: str, now: QTime
+) -> Optional[str]:
+    """Return the next period id if the current time is in a break window
+    (between end of period N and start of period N+1). Otherwise None.
+    """
+    times = get_effective_period_times(config, day_id)
+    # Preserve period order as defined in config.periods
+    ordered = [(p.id, times[p.id]) for p in config.periods if p.id in times]
+    for idx in range(len(ordered) - 1):
+        pid, (s, e) = ordered[idx]
+        next_pid, (ns, ne) = ordered[idx + 1]
+        if e < now < ns:
+            return next_pid
+    return None
+
+
