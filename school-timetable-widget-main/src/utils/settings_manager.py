@@ -82,6 +82,7 @@ class SettingsManager:
         self.widget_size = {"width": Config.DEFAULT_WINDOW_SIZE[0], "height": Config.DEFAULT_WINDOW_SIZE[1]}
         self.is_position_locked = False  # 위치 고정 여부 (기본값: 고정되지 않음)
         self.widget_screen_info = None  # 멀티모니터 스크린 정보 (기본값)
+        self.cell_size_ratio = None  # 셀 크기 비율 (width/height) - None이면 자동 계산
         
         # 기본 시간 설정 (config에서 가져옴)
         self.time_ranges = {}
@@ -325,7 +326,7 @@ class SettingsManager:
                 "size": self.widget_size,
                 "is_position_locked": self.is_position_locked,
                 "screen_info": self.widget_screen_info,
-                "auto_start_enabled": getattr(self, 'auto_start_enabled', False) # 자동 시작 설정 저장
+                "auto_start_enabled": getattr(self, 'auto_start_enabled', False)  # 자동 시작 설정 저장
             }
             file_path = get_widget_settings_file_path() # utils.paths 사용
             with open(file_path, 'w', encoding='utf-8') as f:

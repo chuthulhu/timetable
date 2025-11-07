@@ -149,6 +149,10 @@ class Widget(DragResizeMixin, QtWidgets.QWidget):
         self.last_screen_dpi = None
         self.last_screen_device_pixel_ratio = None
         
+        # 설정 충돌 방지를 위한 플래그
+        self._is_applying_position = False  # 위치 적용 중 플래그
+        self._save_settings_timer = None  # 설정 저장 디바운싱 타이머
+        
         # 드래그 및 리사이징 관련 변수 초기화 (init_ui 이전에 호출)
         self.init_drag_resize()
         
@@ -171,6 +175,11 @@ class Widget(DragResizeMixin, QtWidgets.QWidget):
         self.resize_timer = QtCore.QTimer(self)
         self.resize_timer.setSingleShot(True)
         self.resize_timer.timeout.connect(self.adjust_cell_sizes)
+        
+        # 설정 저장 디바운싱 타이머 (여러 저장 요청을 하나로 통합)
+        self._save_settings_timer = QtCore.QTimer(self)
+        self._save_settings_timer.setSingleShot(True)
+        self._save_settings_timer.timeout.connect(self._save_widget_settings_debounced)
         
         # 현재 시간에 맞는 교시 하이라이트
         self.update_current_period()
@@ -248,29 +257,37 @@ class Widget(DragResizeMixin, QtWidgets.QWidget):
         main_layout.addLayout(self.grid_layout)
         self.setLayout(main_layout)
         
-        # 그리드 레이아웃 크기 조정을 위한 초기 설정
-        self.setup_grid_sizing()
-        
         # 스타일 적용
         self.update_styles()
         
         # 시간표 데이터 표시
         self.update_timetable_display()
+        
+        # 그리드 레이아웃 크기 조정은 showEvent에서 처리
+        # (위젯이 표시된 후에만 정확한 크기 계산 가능)
     
-    def setup_grid_sizing(self):
-        """그리드 레이아웃의 셀 크기를 균등하게 설정"""
-        self.adjust_cell_sizes()
-    
-    def adjust_cell_sizes(self):
-        """셀의 가로와 세로를 균등하게 조정 (헤더 제외)"""
-        # 드래그/리사이징 중일 때는 실행하지 않음 (속성이 초기화된 경우에만 체크)
-        # 모니터 이동 중에도 드래그가 계속되므로 이 체크가 중요함
-        if hasattr(self, 'resizing') and hasattr(self, 'dragging'):
-            if self.resizing or self.dragging:
-                return
+    def adjust_cell_sizes(self, force: bool = False):
+        """
+        셀의 가로와 세로를 균등하게 조정 (헤더 제외)
+        
+        Args:
+            force: True이면 드래그/리사이징 중에도 강제 실행
+        """
+        # 드래그/리사이징 중일 때는 실행하지 않음 (force가 True가 아닌 경우)
+        if not force:
+            if hasattr(self, 'resizing') and hasattr(self, 'dragging'):
+                if self.resizing or self.dragging:
+                    return
         
         # 위젯이 아직 표시되지 않았거나 크기가 0이면 실행하지 않음
         if not self.isVisible() or self.width() <= 0 or self.height() <= 0:
+            # 위젯이 아직 표시되지 않았으면 나중에 다시 시도
+            if not self.isVisible():
+                QtCore.QTimer.singleShot(100, lambda: self.adjust_cell_sizes(force))
+            return
+        
+        # 레이아웃이 아직 설정되지 않았으면 실행하지 않음
+        if not self.layout() or not self.grid_layout:
             return
         
         # 전체 위젯 크기에서 마진 제외
@@ -330,19 +347,34 @@ class Widget(DragResizeMixin, QtWidgets.QWidget):
         self.grid_layout.setRowMinimumHeight(0, header_row_height)
         self.grid_layout.setRowStretch(0, 0)
         
-        # 셀 열(1-5열) 크기 균등 설정
-        # setColumnMinimumWidth를 사용하지 않고 stretch만 사용하여 레이아웃이 자연스럽게 크기를 조정하도록 함
-        # 이렇게 하면 정사각형으로 고정되지 않고 위젯 크기에 따라 자동으로 조정됨
+        # 셀의 최소 크기 계산 (폰트가 잘리지 않도록)
+        # 현재 스크린의 DPI를 고려하여 최소 크기 계산
+        current_global_pos = self.mapToGlobal(self.rect().center())
+        current_screen = QtWidgets.QApplication.screenAt(current_global_pos)
+        if current_screen is None:
+            current_screen = QtWidgets.QApplication.primaryScreen()
+        
+        dpi_ratio = 1.0
+        if current_screen:
+            dpi_ratio = current_screen.logicalDotsPerInch() / 96.0
+        
+        # 셀 폰트 크기 가져오기 (기본값 10pt)
+        cell_font_size = getattr(self.settings_manager, 'cell_font_size', 10)
+        
+        # 폰트 크기 + 여유 공간(패딩, 줄바꿈 등)을 고려한 최소 크기
+        # pt를 px로 변환: 1pt ≈ 1.33px (96 DPI 기준), DPI 비율 적용
+        min_cell_height_px = int((cell_font_size * 1.33 * 2.5) * dpi_ratio)  # 폰트 크기의 2.5배 (여유 공간 포함)
+        min_cell_width_px = int((cell_font_size * 1.33 * 3.0) * dpi_ratio)  # 폰트 크기의 3배 (한글 2-3자 정도)
+        
+        # 셀 열(1-5열) 크기 균등 설정 + 최소 너비 보장
         for col in range(1, 6):
             self.grid_layout.setColumnStretch(col, 1)  # 모든 열에 동일한 stretch
+            self.grid_layout.setColumnMinimumWidth(col, min_cell_width_px)  # 최소 너비 보장
         
-        # 셀 행(1-7행) 크기 균등 설정
-        # setRowMinimumHeight를 사용하지 않고 stretch만 사용하여 레이아웃이 자연스럽게 크기를 조정하도록 함
+        # 셀 행(1-7행) 크기 균등 설정 + 최소 높이 보장
         for row in range(1, 8):
             self.grid_layout.setRowStretch(row, 1)  # 모든 행에 동일한 stretch
-        
-        # 셀 위젯의 크기 정책이 이미 Ignored로 설정되어 있으므로
-        # 레이아웃이 stretch 비율에 따라 균등하게 크기를 할당함
+            self.grid_layout.setRowMinimumHeight(row, min_cell_height_px)  # 최소 높이 보장
     
     def apply_saved_position(self):
         """
@@ -350,6 +382,9 @@ class Widget(DragResizeMixin, QtWidgets.QWidget):
         - 저장된 screen_info(geometry, name)가 있으면 해당 스크린 기준으로 복원
         - 없거나 스크린이 사라졌으면 primaryScreen 기준 fallback
         """
+        # 위치 적용 중 플래그 설정 (resizeEvent에서 중복 호출 방지)
+        self._is_applying_position = True
+        
         pos = self.settings_manager.widget_position
         size = self.settings_manager.widget_size
         screen_info = getattr(self.settings_manager, 'widget_screen_info', None)
@@ -402,6 +437,9 @@ class Widget(DragResizeMixin, QtWidgets.QWidget):
         self.move(final_x, final_y)
         self.resize(widget_width, widget_height)
         
+        # 위치 적용 완료 플래그 해제
+        QtCore.QTimer.singleShot(100, lambda: setattr(self, '_is_applying_position', False))
+        
         # 위치 적용 후 셀 크기 조정 (모니터 변경 시 레이아웃이 완전히 업데이트될 때까지 충분한 지연)
         # 여러 번의 이벤트가 발생할 수 있으므로 더 긴 지연 시간 사용
         QtCore.QTimer.singleShot(300, self.adjust_cell_sizes)
@@ -434,7 +472,14 @@ class Widget(DragResizeMixin, QtWidgets.QWidget):
                 'name': screen.name()
             }
         logger.debug(f"Saving widget position. Screen info: {screen_info}, Widget pos: {pos}, Widget size: {size}")
-        self.settings_manager.save_widget_position(pos.x(), pos.y(), size.width(), size.height(), screen_info)
+        
+        # SettingsManager에 위치/크기 업데이트
+        self.settings_manager.widget_position = {"x": pos.x(), "y": pos.y()}
+        self.settings_manager.widget_size = {"width": size.width(), "height": size.height()}
+        self.settings_manager.widget_screen_info = screen_info
+        
+        # 설정 저장을 디바운싱하여 스케줄링 (셀 크기 비율 저장과 통합)
+        self._schedule_settings_save()
     
     def update_styles(self):
         """모든 위젯에 현재 스타일 설정 적용"""
@@ -598,6 +643,10 @@ class Widget(DragResizeMixin, QtWidgets.QWidget):
             self.resize_timer.stop()
             return
         
+        # 위치 적용 중일 때는 중복 호출 방지
+        if self._is_applying_position:
+            return
+        
         # 모니터 변경 등으로 인한 크기 변경 시 레이아웃이 완전히 업데이트될 때까지 약간의 지연
         # 타이머를 사용하여 연속된 resize 이벤트를 하나로 묶어 처리
         # 지연 시간을 늘려서 레이아웃이 완전히 안정화된 후에 실행
@@ -612,9 +661,16 @@ class Widget(DragResizeMixin, QtWidgets.QWidget):
         # hasattr 체크를 추가하여 초기화 전에 호출되는 경우 방지
         if hasattr(self, 'resizing') and hasattr(self, 'dragging'):
             if not (self.resizing or self.dragging):
-                # 모니터 변경 시 레이아웃이 완전히 업데이트될 때까지 충분한 지연
-                # DPI 변경도 함께 확인
-                QtCore.QTimer.singleShot(300, self._check_and_adjust_for_dpi_change)
+                # 위젯이 처음 표시될 때는 즉시 셀 크기 조정
+                # 이후 표시될 때는 모니터 변경 등을 고려하여 지연
+                if not hasattr(self, '_has_been_shown'):
+                    # 첫 표시: 레이아웃이 완전히 업데이트될 때까지 약간의 지연
+                    QtCore.QTimer.singleShot(100, self.adjust_cell_sizes)
+                    self._has_been_shown = True
+                else:
+                    # 이후 표시: 모니터 변경 시 레이아웃이 완전히 업데이트될 때까지 충분한 지연
+                    # DPI 변경도 함께 확인
+                    QtCore.QTimer.singleShot(300, self._check_and_adjust_for_dpi_change)
     
     def changeEvent(self, event):
         """위젯 상태 변경 이벤트 처리 (모니터 변경 감지)"""
@@ -631,6 +687,22 @@ class Widget(DragResizeMixin, QtWidgets.QWidget):
                     # 모니터 변경 시 레이아웃이 완전히 업데이트될 때까지 충분한 지연
                     # DPI 변경도 함께 확인
                     QtCore.QTimer.singleShot(300, self._check_and_adjust_for_dpi_change)
+    
+    def _schedule_settings_save(self):
+        """설정 저장을 디바운싱하여 스케줄링"""
+        # 기존 타이머 취소
+        if self._save_settings_timer:
+            self._save_settings_timer.stop()
+        
+        # 1초 후 저장 (여러 변경사항을 하나로 통합)
+        self._save_settings_timer.start(1000)
+    
+    def _save_widget_settings_debounced(self):
+        """디바운싱된 설정 저장"""
+        try:
+            self.settings_manager.save_widget_settings()
+        except Exception as e:
+            logger.error(f"설정 저장 오류: {e}")
     
     def _check_and_adjust_for_dpi_change(self):
         """DPI 변경 확인 및 셀 크기 조정"""
@@ -662,10 +734,10 @@ class Widget(DragResizeMixin, QtWidgets.QWidget):
             if dpi_changed:
                 logger.debug(f"DPI 변경 감지: DPI={current_dpi}, DevicePixelRatio={current_device_pixel_ratio}")
                 # DPI 변경 시 셀 크기 재조정 (약간의 추가 지연)
-                QtCore.QTimer.singleShot(100, self.adjust_cell_sizes)
+                QtCore.QTimer.singleShot(100, lambda: self.adjust_cell_sizes(force=True))
             else:
                 # DPI 변경이 없어도 일반적인 셀 크기 조정
-                self.adjust_cell_sizes()
+                self.adjust_cell_sizes(force=True)
     
     def show_context_menu(self, pos):
         """마우스 우클릭 메뉴 표시"""
