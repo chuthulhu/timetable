@@ -1,7 +1,0 @@
-pyqt5
-pywin32
-psutil
-appdirs
-requests
-pyinstaller
-

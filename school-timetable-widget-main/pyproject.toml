@@ -1,0 +1,16 @@
+[tool.pyright]
+include = ["src"]
+exclude = ["**/__pycache__", "**/node_modules", "**/.git"]
+reportMissingImports = "none"
+reportMissingTypeStubs = false
+pythonVersion = "3.8"
+typeCheckingMode = "basic"
+
+[tool.basedpyright]
+include = ["src"]
+exclude = ["**/__pycache__", "**/node_modules", "**/.git"]
+reportMissingImports = "none"
+reportMissingTypeStubs = false
+pythonVersion = "3.8"
+typeCheckingMode = "basic"
+

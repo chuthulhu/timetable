@@ -1,0 +1,13 @@
+# 텍스트 파일 자동 처리
+*.py text eol=lf
+*.txt text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.spec text eol=lf
+
+# 바이너리 파일
+*.ico binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.exe binary
