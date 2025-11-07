@@ -150,7 +150,8 @@ class ReleaseManager:
             
             # 파일 업로드
             if files:
-                self.upload_assets(release['id'], files)
+                upload_url = release.get('upload_url', '').split('{')[0]  # {?name,label} 제거
+                self.upload_assets(release['id'], files, upload_url)
             
             return True
         except requests.exceptions.RequestException as e:
@@ -163,9 +164,21 @@ class ReleaseManager:
                     pass
             return False
     
-    def upload_assets(self, release_id: int, files: List[str]) -> bool:
+    def upload_assets(self, release_id: int, files: List[str], upload_url: Optional[str] = None) -> bool:
         """릴리즈에 파일 업로드"""
         success_count = 0
+        
+        # upload_url이 없으면 릴리즈 정보에서 가져오기
+        if not upload_url:
+            release = self.get_release_by_id(release_id)
+            if not release:
+                print(f"❌ 릴리즈 ID {release_id}를 찾을 수 없습니다.")
+                return False
+            upload_url = release.get('upload_url', '').split('{')[0]  # {?name,label} 제거
+        
+        if not upload_url:
+            print("❌ 업로드 URL을 찾을 수 없습니다.")
+            return False
         
         for file_path in files:
             file_path_obj = Path(file_path)
@@ -184,16 +197,28 @@ class ReleaseManager:
             print(f"📤 업로드 중: {file_name} ({file_size / 1024 / 1024:.1f} MB)...")
             
             try:
-                # GitHub API는 multipart/form-data 형식으로 파일 업로드
+                # GitHub API는 raw binary로 파일 업로드
+                # upload_url에 ?name=filename 쿼리 추가
+                upload_endpoint = f"{upload_url}?name={file_name}"
+                
                 with open(file_path, 'rb') as f:
-                    files_data = {'file': (file_name, f, 'application/octet-stream')}
+                    file_content = f.read()
+                    
+                    # Content-Type 결정
+                    content_type = 'application/octet-stream'
+                    if file_name.endswith('.exe'):
+                        content_type = 'application/x-msdownload'
+                    elif file_name.endswith('.zip'):
+                        content_type = 'application/zip'
+                    
                     response = requests.post(
-                        f"{GITHUB_API_BASE}/releases/{release_id}/assets",
+                        upload_endpoint,
                         headers={
                             "Authorization": f"token {self.token}",
-                            "Accept": "application/vnd.github.v3+json"
+                            "Accept": "application/vnd.github.v3+json",
+                            "Content-Type": content_type
                         },
-                        files=files_data,
+                        data=file_content,
                         timeout=300  # 큰 파일을 위한 긴 타임아웃
                     )
                     response.raise_for_status()
@@ -201,9 +226,29 @@ class ReleaseManager:
                     success_count += 1
             except requests.exceptions.RequestException as e:
                 print(f"   ❌ 업로드 실패: {file_name} - {e}")
+                if hasattr(e, 'response') and e.response is not None:
+                    try:
+                        error_data = e.response.json()
+                        print(f"      상세: {error_data.get('message', '알 수 없는 오류')}")
+                    except:
+                        print(f"      응답: {e.response.text[:200]}")
         
         print(f"\n📊 업로드 결과: {success_count}/{len(files)} 파일 성공")
         return success_count > 0
+    
+    def get_release_by_id(self, release_id: int) -> Optional[Dict]:
+        """릴리즈 ID로 릴리즈 정보 가져오기"""
+        try:
+            response = requests.get(
+                f"{GITHUB_API_BASE}/releases/{release_id}",
+                headers=self.headers,
+                timeout=10
+            )
+            if response.status_code == 200:
+                return response.json()
+            return None
+        except requests.exceptions.RequestException:
+            return None
     
     def delete_release(self, release_id: int) -> bool:
         """릴리즈 삭제"""
@@ -313,6 +358,9 @@ def main():
 
 환경변수:
   GITHUB_TOKEN: GitHub Personal Access Token
+  
+토큰 설정:
+  python tools/setup_token.py  # 자동 설정 스크립트 실행
         """
     )
     

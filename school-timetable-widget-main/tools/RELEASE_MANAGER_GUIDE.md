@@ -18,19 +18,34 @@
 
 ### 2. 환경변수 설정
 
-#### Windows (PowerShell)
+#### 방법 1: 자동 설정 스크립트 (권장)
+```bash
+python tools/setup_token.py
+```
+이 스크립트가 토큰을 입력받아 환경변수를 자동으로 설정합니다.
+
+#### 방법 2: 수동 설정
+
+##### Windows (PowerShell) - 현재 세션만
 ```powershell
 $env:GITHUB_TOKEN = "your_token_here"
 ```
 
-#### Windows (CMD)
+##### Windows (CMD) - 현재 세션만
 ```cmd
 set GITHUB_TOKEN=your_token_here
 ```
 
-#### 영구 설정 (Windows)
+##### Windows - 영구 설정 (GUI)
 1. 시스템 속성 → 환경 변수
 2. 사용자 변수에 `GITHUB_TOKEN` 추가
+3. 값에 토큰 입력
+
+##### Windows - 영구 설정 (명령줄)
+```cmd
+setx GITHUB_TOKEN "your_token_here"
+```
+주의: 새 터미널 창에서만 적용됩니다.
 
 #### Linux/Mac
 ```bash
