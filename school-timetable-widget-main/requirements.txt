@@ -8,14 +8,6 @@ requests>=2.25.0
 # win10toast>=0.9  # Windows 알림 (선택적)
 # pywin32>=300     # Windows 자동 시작 (선택적)
 
-# QR 코드 기능 (선택적)
-# qrcode[pil]>=7.0
-# Pillow>=8.0
-
-# QR 코드 스캔 기능 (선택적)
-# opencv-python>=4.5.0
-# pyzbar>=0.1.8
-
 # 개발 의존성
 pytest>=6.0.0
 

@@ -37,16 +37,6 @@ Windows 자동 시작 기능:
 pip install pywin32
 ```
 
-QR 코드 공유 기능:
-```bash
-pip install qrcode[pil] Pillow
-```
-
-QR 코드 스캔 기능:
-```bash
-pip install opencv-python pyzbar
-```
-
 ### 3. 실행
 
 프로젝트 루트에서:

@@ -34,6 +34,10 @@ class DragResizeMixin:
     
     def handle_mouse_press(self, event):
         if event.button() == QtCore.Qt.LeftButton:
+            # 드래그/리사이징 시작 시 모든 셀 크기 조정 타이머를 취소
+            if hasattr(self, 'resize_timer'):
+                self.resize_timer.stop()
+            
             # 위치가 고정되어 있으면 크기 조절만 허용
             if self.settings_manager.is_position_locked:
                 if event.pos().x() >= self.rect().width() - 20 and event.pos().y() >= self.rect().height() - 20:
@@ -73,6 +77,9 @@ class DragResizeMixin:
             self.resize(new_width, new_height)
         elif self.dragging and event.buttons() == QtCore.Qt.LeftButton and not self.settings_manager.is_position_locked:
             # 위치 고정이 아닐 때만 드래그 허용
+            # 드래그 중에는 셀 크기 조정 타이머를 취소하여 모니터 이동 시 발생하는 resizeEvent로 인한 셀 크기 변경 방지
+            if hasattr(self, 'resize_timer'):
+                self.resize_timer.stop()
             self.move(event.globalPos() - self.drag_start_pos)
         else:
             if event.pos().x() >= self.rect().width() - 20 and event.pos().y() >= self.rect().height() - 20:
@@ -98,7 +105,8 @@ class DragResizeMixin:
             elif was_dragging:
                 # 드래그 중 모니터 이동 시 위젯 크기가 변경될 수 있으므로 드래그 종료 시에도 셀 크기 조정
                 # 모니터 변경 후 레이아웃이 완전히 안정화될 때까지 충분한 지연
-                QtCore.QTimer.singleShot(300, self.adjust_cell_sizes)
+                # DPI 변경도 함께 확인
+                QtCore.QTimer.singleShot(300, self._check_and_adjust_for_dpi_change)
 
 class Widget(DragResizeMixin, QtWidgets.QWidget):
     def __init__(
@@ -130,15 +138,29 @@ class Widget(DragResizeMixin, QtWidgets.QWidget):
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)  # 배경을 완전 투명하게 설정
         self.setMouseTracking(True)
         
+        # DPI 스케일링 지원 활성화 (모니터 간 이동 시 DPI 변경 처리)
+        self.setAttribute(QtCore.Qt.WA_AcceptTouchEvents, False)
+        
         # 현재 교시 및 요일 정보 초기화
         self.current_period = None
         self.current_day_idx = None
+        
+        # 현재 스크린의 DPI 정보 저장 (모니터 간 이동 시 DPI 변경 감지용)
+        self.last_screen_dpi = None
+        self.last_screen_device_pixel_ratio = None
         
         # 드래그 및 리사이징 관련 변수 초기화 (init_ui 이전에 호출)
         self.init_drag_resize()
         
         # 위젯 초기화
         self.init_ui()
+        
+        # 초기 DPI 정보 저장
+        current_global_pos = self.mapToGlobal(self.rect().center()) if self.isVisible() else QtCore.QPoint(0, 0)
+        current_screen = QtWidgets.QApplication.screenAt(current_global_pos) if self.isVisible() else QtWidgets.QApplication.primaryScreen()
+        if current_screen:
+            self.last_screen_dpi = current_screen.logicalDotsPerInch()
+            self.last_screen_device_pixel_ratio = current_screen.devicePixelRatio()
         
         # 타이머 설정 (매 분마다 현재 교시 업데이트)
         self.timer = QtCore.QTimer(self)
@@ -212,6 +234,10 @@ class Widget(DragResizeMixin, QtWidgets.QWidget):
                 # 셀 크기를 레이아웃이 완전히 제어하도록 설정 (내용에 따라 크기 변경 방지)
                 # Ignored 정책을 사용하면 위젯이 자신의 크기를 제안하지 않고 레이아웃이 완전히 제어
                 cell.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Ignored)
+                # 셀의 최소/최대 크기를 설정하여 내용에 의존하지 않도록 함
+                # DPI 변경 시에도 셀 크기가 내용에 의해 변경되지 않도록 최소 크기를 0으로 설정
+                cell.setMinimumSize(0, 0)
+                cell.setMaximumSize(16777215, 16777215)  # QWIDGETSIZE_MAX
                 # 마우스 이벤트 추적 설정
                 cell.setMouseTracking(True)
                 cell.enterEvent = lambda event, c=cell: self.on_cell_hover_enter(event, c)
@@ -256,13 +282,51 @@ class Widget(DragResizeMixin, QtWidgets.QWidget):
         if available_width <= 0 or available_height <= 0:
             return
         
-        # 교시 헤더 열(0열) 크기 설정 - 내용에 맞게 (최소 크기만 설정)
-        header_col_width = max(40, self.period_headers[1].sizeHint().width() if self.period_headers else 40)
+        # 교시 헤더 열(0열) 크기 설정
+        # DPI 변경에 대응하기 위해 sizeHint() 대신 고정값 사용
+        # DPI가 높은 모니터에서도 일관된 크기 유지
+        if self.period_headers:
+            # sizeHint()를 사용하되, DPI를 고려한 최소값 설정
+            header_col_width_hint = self.period_headers[1].sizeHint().width()
+            # 현재 스크린의 DPI를 고려하여 최소 크기 계산
+            current_global_pos = self.mapToGlobal(self.rect().center())
+            current_screen = QtWidgets.QApplication.screenAt(current_global_pos)
+            if current_screen is None:
+                current_screen = QtWidgets.QApplication.primaryScreen()
+            
+            if current_screen:
+                dpi_ratio = current_screen.logicalDotsPerInch() / 96.0  # 96 DPI 기준
+                # 기본 최소 크기(40px)에 DPI 비율 적용
+                min_header_width = int(40 * dpi_ratio)
+                header_col_width = max(min_header_width, header_col_width_hint)
+            else:
+                header_col_width = max(40, header_col_width_hint)
+        else:
+            header_col_width = 40
+        
         self.grid_layout.setColumnMinimumWidth(0, header_col_width)
         self.grid_layout.setColumnStretch(0, 0)
         
-        # 요일 헤더 행(0행) 크기 설정 - 내용에 맞게 (최소 크기만 설정)
-        header_row_height = max(30, self.day_headers[1].sizeHint().height() if self.day_headers else 30)
+        # 요일 헤더 행(0행) 크기 설정
+        # DPI 변경에 대응하기 위해 sizeHint() 대신 고정값 사용
+        if self.day_headers:
+            header_row_height_hint = self.day_headers[1].sizeHint().height()
+            # 현재 스크린의 DPI를 고려하여 최소 크기 계산
+            current_global_pos = self.mapToGlobal(self.rect().center())
+            current_screen = QtWidgets.QApplication.screenAt(current_global_pos)
+            if current_screen is None:
+                current_screen = QtWidgets.QApplication.primaryScreen()
+            
+            if current_screen:
+                dpi_ratio = current_screen.logicalDotsPerInch() / 96.0  # 96 DPI 기준
+                # 기본 최소 크기(30px)에 DPI 비율 적용
+                min_header_height = int(30 * dpi_ratio)
+                header_row_height = max(min_header_height, header_row_height_hint)
+            else:
+                header_row_height = max(30, header_row_height_hint)
+        else:
+            header_row_height = 30
+        
         self.grid_layout.setRowMinimumHeight(0, header_row_height)
         self.grid_layout.setRowStretch(0, 0)
         
@@ -528,7 +592,10 @@ class Widget(DragResizeMixin, QtWidgets.QWidget):
         """위젯 크기 변경 시 셀 크기 조정"""
         super().resizeEvent(event)
         # 드래그/리사이징 중일 때는 셀 크기 조정을 하지 않음 (성능 최적화)
+        # 드래그 중 모니터 이동 시에도 resizeEvent가 발생할 수 있으므로 반드시 체크 필요
         if self.resizing or self.dragging:
+            # 드래그/리사이징 중에는 타이머도 완전히 중지하여 드래그 종료 후 실행되는 것을 방지
+            self.resize_timer.stop()
             return
         
         # 모니터 변경 등으로 인한 크기 변경 시 레이아웃이 완전히 업데이트될 때까지 약간의 지연
@@ -546,7 +613,8 @@ class Widget(DragResizeMixin, QtWidgets.QWidget):
         if hasattr(self, 'resizing') and hasattr(self, 'dragging'):
             if not (self.resizing or self.dragging):
                 # 모니터 변경 시 레이아웃이 완전히 업데이트될 때까지 충분한 지연
-                QtCore.QTimer.singleShot(300, self.adjust_cell_sizes)
+                # DPI 변경도 함께 확인
+                QtCore.QTimer.singleShot(300, self._check_and_adjust_for_dpi_change)
     
     def changeEvent(self, event):
         """위젯 상태 변경 이벤트 처리 (모니터 변경 감지)"""
@@ -561,7 +629,43 @@ class Widget(DragResizeMixin, QtWidgets.QWidget):
             if hasattr(self, 'resizing') and hasattr(self, 'dragging'):
                 if not (self.resizing or self.dragging):
                     # 모니터 변경 시 레이아웃이 완전히 업데이트될 때까지 충분한 지연
-                    QtCore.QTimer.singleShot(300, self.adjust_cell_sizes)
+                    # DPI 변경도 함께 확인
+                    QtCore.QTimer.singleShot(300, self._check_and_adjust_for_dpi_change)
+    
+    def _check_and_adjust_for_dpi_change(self):
+        """DPI 변경 확인 및 셀 크기 조정"""
+        # 현재 위젯이 속한 스크린의 DPI 정보 가져오기
+        current_global_pos = self.mapToGlobal(self.rect().center())
+        current_screen = QtWidgets.QApplication.screenAt(current_global_pos)
+        
+        if current_screen is None:
+            current_screen = QtWidgets.QApplication.primaryScreen()
+        
+        if current_screen:
+            # 현재 스크린의 DPI 정보
+            current_dpi = current_screen.logicalDotsPerInch()
+            current_device_pixel_ratio = current_screen.devicePixelRatio()
+            
+            # DPI가 변경되었는지 확인
+            dpi_changed = (
+                self.last_screen_dpi is not None and 
+                self.last_screen_dpi != current_dpi
+            ) or (
+                self.last_screen_device_pixel_ratio is not None and 
+                self.last_screen_device_pixel_ratio != current_device_pixel_ratio
+            )
+            
+            # DPI 정보 업데이트
+            self.last_screen_dpi = current_dpi
+            self.last_screen_device_pixel_ratio = current_device_pixel_ratio
+            
+            if dpi_changed:
+                logger.debug(f"DPI 변경 감지: DPI={current_dpi}, DevicePixelRatio={current_device_pixel_ratio}")
+                # DPI 변경 시 셀 크기 재조정 (약간의 추가 지연)
+                QtCore.QTimer.singleShot(100, self.adjust_cell_sizes)
+            else:
+                # DPI 변경이 없어도 일반적인 셀 크기 조정
+                self.adjust_cell_sizes()
     
     def show_context_menu(self, pos):
         """마우스 우클릭 메뉴 표시"""
@@ -582,14 +686,11 @@ class Widget(DragResizeMixin, QtWidgets.QWidget):
         lock_action.setChecked(self.settings_manager.is_position_locked)
         lock_action.triggered.connect(self.toggle_position_lock)
         
-        # 새 기능: QR코드 공유 메뉴 추가
+        # 공유 및 백업 메뉴
         menu.addSeparator()
         sharing_menu = menu.addMenu("공유 및 백업")
         
-        qr_share_action = sharing_menu.addAction("QR코드로 공유")
-        qr_share_action.triggered.connect(self.show_qr_share_dialog)
-        
-        import_action = sharing_menu.addAction("QR코드/파일에서 가져오기")
+        import_action = sharing_menu.addAction("파일에서 가져오기")
         import_action.triggered.connect(self.show_import_dialog)
         
         backup_action = sharing_menu.addAction("백업/복원")
@@ -603,32 +704,11 @@ class Widget(DragResizeMixin, QtWidgets.QWidget):
         # 메뉴 표시
         menu.exec_(self.mapToGlobal(pos))
 
-    # 새 메서드 추가
-    def show_qr_share_dialog(self):
-        """QR 코드 공유 대화상자 표시"""
-        try:
-            from .dialogs.qr_share_dialog import QRShareDialog
-            dialog = QRShareDialog(self)
-            dialog.exec_()
-        except ImportError as e:
-            QtWidgets.QMessageBox.warning(
-                self, 
-                "모듈 오류", 
-                f"QR 코드 모듈을 불러올 수 없습니다.\n필요한 패키지: qrcode, Pillow\n오류: {str(e)}"
-            )
-
     def show_import_dialog(self):
         """데이터 가져오기 대화상자 표시"""
-        try:
-            from .dialogs.import_dialog import ImportDialog
-            dialog = ImportDialog(self)
-            dialog.exec_()
-        except ImportError as e:
-            QtWidgets.QMessageBox.warning(
-                self, 
-                "모듈 오류", 
-                f"필요한 모듈을 불러올 수 없습니다.\n필요한 패키지: opencv-python, pyzbar\n오류: {str(e)}"
-            )
+        from .dialogs.import_dialog import ImportDialog
+        dialog = ImportDialog(self)
+        dialog.exec_()
 
     def show_backup_dialog(self):
         """백업 관리 대화상자 표시"""

@@ -25,7 +25,6 @@ school-timetable-widget-main/
 │   │   └── dialogs/             # 대화상자
 │   │       ├── backup_dialog.py
 │   │       ├── import_dialog.py
-│   │       ├── qr_share_dialog.py
 │   │       ├── settings_dialog.py
 │   │       ├── time_dialog.py
 │   │       └── timetable_dialog.py
